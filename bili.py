@@ -365,7 +365,7 @@ class DbHandler(object):
             ret.append(cursor.execute(sql))
             end = datetime.now()
 
-            if end.microsecond - begin.microsecond > 6000*1000: # > 6ms
+            if end.microsecond - begin.microsecond > 6*1000: # > 6ms
                 gLogger.warning('execute sql: %s, cost: %s' % (sql, end.microsecond - begin.microsecond))
 
             ret.append(cursor.fetchall())
