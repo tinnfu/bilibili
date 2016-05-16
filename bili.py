@@ -11,6 +11,7 @@ import threading
 import socket
 import commands
 import MySQLdb
+import traceback
 from datetime import datetime
 
 from lib.zip import *
@@ -64,7 +65,7 @@ def ExpectEQ(x, y, errMsg = None):
     return True
 
 # return type: None
-def AssertNE(x, y, errMsg):
+def AssertNE(x, y, errMsg = None):
     if x == y:
         gLogger.die(errMsg if errMsg else "expect: '%s' != '%s'" % (x, y))
 
@@ -76,12 +77,12 @@ def ExpectNE(x, y, errMsg = None):
     return True
 
 # return type: None
-def AssertGT(x, y, errMsg):
+def AssertGT(x, y, errMsg = None):
     if x <= y:
         gLogger.die(errMsg if errMsg else "expect: '%s' > '%s'" % (x, y))
 
 # return type: None
-def AssertGE(x, y, errMsg):
+def AssertGE(x, y, errMsg = None):
     if x < y:
         gLogger.die(errMsg if errMsg else "expect: '%s' >= '%s'" % (x, y))
 
@@ -142,11 +143,11 @@ def GetPage(url, timeout = 10, retry_times = 3):
             error = ex
 
         times += 1
-        gLogger.warning('error: %s, retry[%s]: %d' % (repr(error), url, times))
+        gLogger.warning('error: %s, retry[%s]: %d' % (str(error), url, times))
         time.sleep(0.5)
 
     if content == '':
-        gLogger.error('fail to GetPage: %s, %s' % (str(ex), url))
+        gLogger.error('fail to GetPage: %s, %s' % (str(error), url))
 
     return content
 
@@ -159,7 +160,8 @@ def GetPageCount(url):
         ret = re.search('共\s+?(\d+?)\s+?页', buf)
         return int(ret.group(1))
     except Exception as ex:
-        gLogger.die(str(ex))
+        gLogger.exception(str(ex))
+        return -1
 
 class PageInfo(object):
     '''PageInfo: store page urls range in [beginIndex, beginIndex + indexCount)'''
@@ -222,6 +224,7 @@ class Callback(object):
             else:
                 self.__mErrMsg = ErrorCode.ToString(errcode)
         except Exception as ex:
+            gLogger.exception(str(ex))
             self.__mErrcode = ErrorCode.UNKNOW_ERROR
             self.__mErrMsg = ErrorCode.ToString(errcode)
 
@@ -263,10 +266,10 @@ class PageDownloader(threading.Thread):
             self.mCb.SetResult(pages)
             self.mCb.SetErrorCode(ErrorCode.OK)
         except AssertionError as ex:
-            self.mLogger.error(str(ex))
+            self.mLogger.exception(str(ex))
             self.mCb.SetErrorCode(ErrorCode.ASSERT_ERROR, str(ex))
         except Exception as ex:
-            self.mLogger.error(str(ex))
+            self.mLogger.exception(str(ex))
             self.mCb.SetErrorCode(ErrorCode.UNKNOW_ERROR, str(ex))
         finally:
             self.mCb.Run()
@@ -309,7 +312,7 @@ class VideoDetector(threading.Thread):
             self.mCb.SetErrorCode(ErrorCode.OK)
             self.mCb.SetResult(list(result))
         except Exception as ex:
-            self.mLogger.error(str(ex))
+            self.mLogger.exception(str(ex))
             self.mCb.SetErrorCode(ErrorCode.UNKNOW_ERROR, str(ex))
         finally:
             self.mCb.Run()
@@ -328,7 +331,7 @@ class JsonInfo(SaveTargetInfo):
         return 'json file name: %s' % self.mJsonFile
 
 class DbInfo(SaveTargetInfo):
-    '''DbInfo: host, user, passwd, db, port, table. But port not used'''
+    '''DbInfo: host, user, passwd, db, port, table'''
 
     def __init__(self, host = 'localhost', user = 'root', passwd = '', db = '', port = 3306, table = ''):
         self.mHost = host
@@ -349,13 +352,16 @@ class DbHandler(object):
         MatchType(dbInfo, DbInfo)
 
         self.mDbInfo = dbInfo
-        self.mConnection = MySQLdb.connect(dbInfo.mHost, dbInfo.mUser, dbInfo.mPasswd, charset = 'utf8')
+        self.mConnection = MySQLdb.connect(host = dbInfo.mHost, user = dbInfo.mUser, passwd = dbInfo.mPasswd, port = dbInfo.mPort, charset = 'utf8')
 
     def __del__(self):
         self.mConnection.commit()
         self.mConnection.close()
 
     def Execute(self, sql):
+        def ShortSql(sql):
+            return sql[:min(128, len(sql))]
+
         ret = []
         cursor = None
         try:
@@ -366,30 +372,34 @@ class DbHandler(object):
             end = datetime.now()
 
             if end.microsecond - begin.microsecond > 6*1000: # > 6ms
-                gLogger.warning('execute sql: %s, cost: %s' % (sql, end.microsecond - begin.microsecond))
+                gLogger.warning('slow sql: %s, cost: %s us' % (ShortSql(sql), end.microsecond - begin.microsecond))
 
             ret.append(cursor.fetchall())
             self.mConnection.commit()
-        except cursor.Warning as ex:
-            ret = [ErrorCode.EXECUTE_SQL_ERROR, 'sql: %s, err: %s' % (sql, str(ex))]
-            self.mConnection.rollback()
-        except cursor.Error as ex:
-            ret = [ErrorCode.EXECUTE_SQL_ERROR, 'sql: %s, err: %s' % (sql, str(ex))]
+        except MySQLdb.Error as ex:
+            gLogger.exception(str(ex))
+            ret = [ErrorCode.EXECUTE_SQL_ERROR, 'sql: %s, err: %s' % (ShortSql(sql), str(ex))]
             self.mConnection.rollback()
         except Exception as ex:
-            ret = [ErrorCode.EXECUTE_SQL_ERROR, 'sql: %s, err: %s' % (sql, str(ex))]
+            gLogger.exception(str(ex))
+            ret = [ErrorCode.EXECUTE_SQL_ERROR, 'sql: %s, err: %s' % (ShortSql(sql), str(ex))]
             self.mConnection.rollback()
         finally:
             if cursor != None:
                 cursor.close()
 
-        gLogger.debug('execute sql: %s, ret: %s' % (sql, str(ret)))
+            if ErrorCode.EXECUTE_SQL_ERROR != ret[0]:
+                ret = [ErrorCode.OK, ret]
+
+        gLogger.debug('execute sql: %s, ret: %s' % (ShortSql(sql), str(ret)))
         return ret
 
     def DbExist(self, db = None):
         dbName = db if db else self.mDbInfo.mDb
         sql = "show databases like '%s'" % dbName
-        return (1 == self.Execute(sql)[0])
+        ret = self.Execute(sql)
+        # ret: [errcode, [rows, ((value,...), ...)]]
+        return ErrorCode.OK == ret[0] and 1 == ret[1][0]
 
     def TableExist(self, db = None, table = None):
         dbName = db if db else self.mDbInfo.mDb
@@ -398,19 +408,17 @@ class DbHandler(object):
         self.Execute('use %s' % dbName)
         ret = self.Execute("show tables")
 
-        return (tableName,) in ret[1]
+        if ErrorCode.OK == ret[0]:
+            # ret: [errcode, [rows, ((value,...), ...)]]
+            return (tableName,) in ret[1][1]
+
+        return False
 
     def CreateDb(self, db = None):
         dbName = db if db else self.mDbInfo.mDb
 
         sql = 'create database if not exists %s' % dbName
-        ret = self.Execute(sql)
-        if ErrorCode.EXECUTE_SQL_ERROR == ret[0]:
-            ret[0] = ErrorCode.CREATE_DB_ERROR
-        else:
-            ret[0] = ErrorCode.OK
-
-        return ret
+        return self.Execute(sql)
 
     def CreateTable(self, db = None, table = None):
         dbName = db if db else self.mDbInfo.mDb
@@ -418,13 +426,7 @@ class DbHandler(object):
 
         global gCreateTable
         sql = gCreateTable % (dbName, tableName)
-        ret = self.Execute(sql)
-        if ErrorCode.EXECUTE_SQL_ERROR == ret[0]:
-            ret[0] = ErrorCode.CREATE_TABLE_ERROR
-        else:
-            ret[0] = ErrorCode.OK
-
-        return ret
+        return self.Execute(sql)
 
     def MergeInsert(self, objList, db = None, table = None):
         dbName = db if db else self.mDbInfo.mDb
@@ -433,11 +435,11 @@ class DbHandler(object):
         # 1. load from db
         sql = 'SELECT av FROM %s.%s' % (dbName, tableName)
         ret = self.Execute(sql)
-        if ErrorCode.EXECUTE_SQL_ERROR == ret[0]:
+        if ErrorCode.OK != ret[0]:
             return ret
 
         # 2. insert new item
-        return self.Insert(objList, db, table, blacklist = [item[0] for item in ret[1]])
+        return self.Insert(objList, db, table, blacklist = [item[0] for item in ret[1][1]])
 
     # always return OK
     def Insert(self, objList, db = None, table = None, blacklist = []):
@@ -451,27 +453,69 @@ class DbHandler(object):
             # the first \ use in python string, the second \ use in SQL string
             return string.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
 
-        print len(blacklist)
-        failCount = successCount = 0
+        gLogger.info('blacklist count = %d' % len(blacklist))
+
+        maxPacket = 16 * 1024 * 1024
+        sql = "show variables like 'max_allowed_packet'"
+        ret = self.Execute(sql)
+        if ErrorCode.OK == ret[0]:
+            ret = ret[1]
+            #[rows, ((value, ...), ...)]
+            maxPacket = long(ret[1][0][1], base = 10)
+            gLogger.info("get 'max_allowd_packet' from DB: %s" % maxPacket)
+        else:
+            gLogger.warning("fail to get 'max_allowd_packet' from DB, err: %s" % str(ret))
+            gLogger.warning("use default 'max_allowd_packet': %s" % maxPacket)
+
+        ret = [ErrorCode.OK, '']
+
+        objList = filter(lambda obj: long(obj['av'], base = 10) not in blacklist, objList)
+
+        op = 'INSERT INTO ' + dbName + '.' + tableName + '(`av`, `title`, `desc`, `img`, `au`, `videodate`) VALUE '
+        values = []
+        item = ''
+        newItemCount = 0
+        start = datetime.now()
         for obj in objList:
-            if long(obj['av'], base = 10) not in blacklist:
-                # value(av, title, desc, img, au, videodate)
-                value = '''%s,"%s","%s","%s","%s","%s"''' % (obj['av'],\
-                        SafeStringForSql(obj['title']), SafeStringForSql(obj['desc']),\
-                        SafeStringForSql(obj['img']), SafeStringForSql(obj['au']),\
-                        SafeStringForSql(obj['videodate']))
-                sql = 'INSERT INTO %s.%s(`av`, `title`, `desc`, `img`, `au`, `videodate`) VALUE(%s)' %\
-                      (dbName, tableName, value)
-                ret = self.Execute(sql)
-                if ErrorCode.EXECUTE_SQL_ERROR == ret[0]:
-                    gLogger.error('error sql: %s, ret: %s' % (sql, str(ret)))
-                    failCount += 1
-                    continue
-                successCount += 1
+            # value(av, title, desc, img, au, videodate)
+            v = ''',(%s,"%s","%s","%s","%s","%s")''' % (obj['av'],\
+                SafeStringForSql(obj['title']), SafeStringForSql(obj['desc']),\
+                SafeStringForSql(obj['img']), SafeStringForSql(obj['au']),\
+                SafeStringForSql(obj['videodate']))
 
-        gLogger.info('insert_new_count = %d, insert_fail_count = %d' % (successCount, failCount))
+            if (len(item) + len(v)) > (maxPacket - len(op)):
+                values.append(item[1:]) # item[1] == ','
+                item = ''
 
-        return [ErrorCode.OK, '']
+            item += v
+            newItemCount += 1
+
+        if len(item) > 0:
+            values.append(item[1:]) # item[1] == ','
+
+        gLogger.info('format value cost: %s' % (datetime.now() - start))
+        print str(datetime.now() - start)
+
+        failTimes = 0
+        start = datetime.now()
+        for value in values:
+            gLogger.info('INSERT packet size: %d' % len(value))
+            ret = self.Execute(op + value)
+            if ErrorCode.OK != ret[0]:
+                gLogger.error('error INSERT, ret: %s' % str(ret))
+                failTimes += 1
+        end = datetime.now()
+
+        if 0 == failTimes:
+            gLogger.info('INSERT OK, newItemCount: %d, insertTimes: %d, cost: %s' %\
+                         (newItemCount, len(values), end - start))
+            ret = [ErrorCode.OK, newItemCount]
+        else:
+            gLogger.info('INSERT ERROR, newItemCount: %d, insertTimes: %d, cost: %s' %\
+                         (newItemCount, len(values), end - start))
+            ret = [ErrorCode.EXECUTE_SQL_ERROR, 'newItemCount: %d, failTimes: %d' % (newItemCount, failTimes)]
+
+        return ret
 
     @staticmethod
     def CheckMySQL():
@@ -494,6 +538,7 @@ class DbHandler(object):
                                 'please start mysql-server: sudo service mysql start')
 
         except Exception as ex:
+            gLogger.exception(str(ex))
             return [ErrorCode.MYSQL_NOT_READY, str(ex)]
 
         return [ErrorCode.OK, '']
@@ -527,9 +572,9 @@ class ResultHandler(object):
         try:
             with open(jsonInfo.mJsonFile, 'w') as f:
                 json.dump(obj, f, indent = 4, separators = (',', ':'),
-                          ensure_ascii = False, sort_keys=True)
+                          ensure_ascii = True, sort_keys=True)
         except Exception as ex:
-            gLogger.die('fail to SaveAsJson: obj = %s, errMsg: %s' % (str(obj), repr(ex)))
+            gLogger.exception('fail to SaveAsJson, jsonFile: %s, errMsg: %s' % (jsonInfo.mJsonFile, str(ex)))
             return ErrorCode.SAVE_ERROR
 
     @staticmethod
@@ -567,7 +612,7 @@ class ResultHandler(object):
                 raise Exception('fail to Save obj into Db, errMsg: %s' % str(ret))
 
         except Exception as ex:
-            gLogger.error('fail to SaveIntoDb: %s, errMsg: %s' % (str(dbInfo), str(ex)))
+            gLogger.exception('fail to SaveIntoDb, dbInfo: %s, errMsg: %s' % (str(dbInfo), str(ex)))
 
         return ret[0]
 
@@ -628,6 +673,7 @@ def main(argv = sys.argv):
     pool = multiprocessing.Pool(cpuCount)
 
     pageCount = GetPageCount(MatchBiliTopPageUrlWithIndex(1)[0])
+    AssertGT(pageCount, 1, 'fail to get pageCount')
     gLogger.info('GetPageCount = %d', pageCount)
 
     dealPagesPerTask = pageCount / cpuCount
@@ -662,7 +708,6 @@ def main(argv = sys.argv):
                             'img': item[2], 'desc': item[3],
                             'au': item[4], 'videodate': item[5]}, res)
 
-    print len(res)
     gLogger.info('get target count = %d' % len(res))
 
     start = datetime.now();
@@ -678,8 +723,7 @@ if __name__ == '__main__':
 
     # following for test
     with open('test.json', 'r') as f:
-        buf = json.load(f)
+        buf = json.load(f, encoding='utf-8')
 
-    print len(buf)
     ResultHandler.Save(buf, target = DbInfo(host = 'localhost', user = 'root',
                                             passwd = 'caft', db = 'video', table = 'asrm'))
