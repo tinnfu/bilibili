@@ -10,9 +10,11 @@ import multiprocessing
 import threading
 import socket
 import commands
-import MySQLdb
 import traceback
 from datetime import datetime
+from optparse import OptionParser
+from optparse import OptionGroup
+from ConfigParser import ConfigParser
 
 from lib.zip import *
 from lib.log import *
@@ -351,6 +353,8 @@ class DbHandler(object):
     def __init__(self, dbInfo):
         MatchType(dbInfo, DbInfo)
 
+        import MySQLdb
+
         self.mDbInfo = dbInfo
         self.mConnection = MySQLdb.connect(host = dbInfo.mHost, user = dbInfo.mUser, passwd = dbInfo.mPasswd, port = dbInfo.mPort, charset = 'utf8')
 
@@ -361,6 +365,8 @@ class DbHandler(object):
     def Execute(self, sql):
         def ShortSql(sql):
             return sql[:min(128, len(sql))]
+
+        import MySQLdb
 
         ret = []
         cursor = None
@@ -577,6 +583,8 @@ class ResultHandler(object):
             gLogger.exception('fail to SaveAsJson, jsonFile: %s, errMsg: %s' % (jsonInfo.mJsonFile, str(ex)))
             return ErrorCode.SAVE_ERROR
 
+        return ErrorCode.OK
+
     @staticmethod
     def SaveIntoDb(obj, dbInfo):
         MatchType(dbInfo, DbInfo, 'dbInfo')
@@ -666,14 +674,15 @@ def TaskFunc(pageInfo, threadCount):
 
     return cb.GetResult()
 
-def main(argv = sys.argv):
+def main(config):
     Init()
 
     cpuCount = multiprocessing.cpu_count()
     pool = multiprocessing.Pool(cpuCount)
 
     pageCount = GetPageCount(MatchBiliTopPageUrlWithIndex(1)[0])
-    AssertGT(pageCount, 1, 'fail to get pageCount')
+    pageCount = 1
+    AssertGT(pageCount, 0, 'fail to get pageCount')
     gLogger.info('GetPageCount = %d', pageCount)
 
     dealPagesPerTask = pageCount / cpuCount
@@ -710,16 +719,105 @@ def main(argv = sys.argv):
 
     gLogger.info('get target count = %d' % len(res))
 
+    target = config.get('saveTarget', 'target')
+    saveTarget = None
+    if target == 'db':
+        saveTarget = DbInfo(host = config.get('db', 'host'),
+                            user = config.get('db', 'user'),
+                            passwd = config.get('db', 'passwd'),
+                            port = config.getint('db', 'port'),
+                            db = config.get('db', 'db'),
+                            table = config.get('db', 'table'))
+    elif target == 'json':
+        saveTarget = JsonInfo(jsonFile = config.get('json', 'jsonFile'))
+    else:
+        gLogger.die('target: %s is not support in saveTarget item' % target)
+
     start = datetime.now();
-    # host, user, passwd, db, port, table
-    ResultHandler.Save(res, target = DbInfo(host = 'localhost', user = 'root',
-                                            passwd = 'caft', db = 'video', table = 'asrm'))
+    ret = ResultHandler.Save(res, target = saveTarget)
     gLogger.info('save result cost: %s' % (datetime.now() - start))
 
-    return 0
+    return ret
+
+def CheckConfig(config):
+    AssertEQ(True, config.has_section('saveTarget'), "make sure section['saveTarget'] is set in config")
+    AssertEQ(True, config.has_option('saveTarget', 'target'), "make sure option['target'] is set in config")
+    if config.get('saveTarget', 'target') == 'db':
+        AssertEQ(True, config.has_section('db'), "make sure section['db'] is set in config")
+        AssertEQ(True, config.has_option('db', 'host'), "make sure option['host'] is set in config")
+        AssertEQ(True, config.has_option('db', 'user'), "make sure option['user'] is set in config")
+        AssertEQ(True, config.has_option('db', 'passwd'), "make sure opttion['passwd'] is set in config")
+        AssertEQ(True, config.has_option('db', 'db'), "make sure option['db'] is set in config")
+        AssertEQ(True, config.has_option('db', 'table'), "make sure option['table'] is set in config")
+    elif config.get('saveTarget', 'target') == 'json':
+        AssertEQ(True, config.has_section('json'), "make sure section['json'] is set in config")
+        AssertEQ(True, config.has_option('json', 'jsonFile'), "make sure option['jsonFile'] is set in config")
+    else:
+        AssertEQ(True, False, 'unknow target: %s for saveTarget' % target)
+
+def LoadConfigWithArgv(argv = sys.argv[1:]):
+    parser = OptionParser(usage = 'Usage: python %prog [options]',
+                          version = '%prog v0.1, debug version',
+                          description = "DESC: %prog just visit bilibili video-music.html, "
+                          "search video in which title contains 'ASRM' and then save"
+                          "the result into DB or Json read from configFile")
+    parser.add_option('-c', '--conf',
+                      dest = 'configFile',
+                      default = 'default.cfg',
+                      help = "configFile to run on, default use default.cfg under current dir")
+
+    group = OptionGroup(parser, 'TOOL: convert between DB and Json',
+                        "Read jsonFile and DB config from configFile, "
+                        "configFile specified with option '-c' or default.cfg")
+    group.add_option('-d', '--db_to_json',
+                      dest = 'JsonToDB',
+                      action = 'store_false',
+                      help = 'save result load from DB into json')
+    group.add_option('-j', '--json_to_db',
+                      dest = 'JsonToDB',
+                      action = 'store_true',
+                      help = 'save result load from json into DB')
+    parser.add_option_group(group)
+
+    (options, args) = parser.parse_args(argv)
+
+    if len(args) > 0:
+        gLogger.error('unknow argument: %s' % str(args))
+        parser.print_help()
+        return None
+
+    # default.cfg:
+    # [saveTarget]
+    # target = db | json
+    #
+    # [db]
+    # host = localhost
+    # user = xxx
+    # passwd = xxx
+    # db = xxx
+    # port = 3306
+    # table = xxx
+    #
+    # [json]
+    # jsonFile = result.json
+
+    config = ConfigParser()
+    if len(config.read(options.configFile)) == 0:
+        gLogger.error('config [%s] not found' % options.configFile)
+        parser.print_help()
+        return None
+
+    try:
+        CheckConfig(config)
+    except Exception as ex:
+        gLogger.exception(str(ex))
+        config = None
+    finally:
+        return config
 
 if __name__ == '__main__':
-    sys.exit(main())
+    config = LoadConfigWithArgv()
+    sys.exit(main(config) if config else -1)
 
     # following for test
     with open('test.json', 'r') as f:
