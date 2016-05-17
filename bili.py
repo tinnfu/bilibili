@@ -681,7 +681,6 @@ def main(config):
     pool = multiprocessing.Pool(cpuCount)
 
     pageCount = GetPageCount(MatchBiliTopPageUrlWithIndex(1)[0])
-    pageCount = 1
     AssertGT(pageCount, 0, 'fail to get pageCount')
     gLogger.info('GetPageCount = %d', pageCount)
 
