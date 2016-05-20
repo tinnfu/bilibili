@@ -100,10 +100,7 @@ class ErrorCode(object):
     ASSERT_ERROR            = -1003
     SAVE_ERROR              = -1004
     MYSQL_NOT_READY         = -1005
-    CREATE_DB_ERROR         = -1006
-    CREATE_TABLE_ERROR      = -1007
     EXECUTE_SQL_ERROR       = -1008
-    INSERT_VALUE_ERROR      = -1009
 
     __E_MAP[OK]                     = 'SUCCESS'
     __E_MAP[UNKNOW_ERROR]           = 'UNKNOW_ERROR'
@@ -111,10 +108,7 @@ class ErrorCode(object):
     __E_MAP[ASSERT_ERROR]           = 'ASSERT_ERROR'
     __E_MAP[SAVE_ERROR]             = 'SAVE_ERROR'
     __E_MAP[MYSQL_NOT_READY]        = 'MYSQL_NOT_READY'
-    __E_MAP[CREATE_DB_ERROR]        = 'CREATE_DB_ERROR'
-    __E_MAP[CREATE_TABLE_ERROR]     = 'CREATE_TABLE_ERROR'
     __E_MAP[EXECUTE_SQL_ERROR]      = 'EXECUTE_SQL_ERROR'
-    __E_MAP[INSERT_VALUE_ERROR]     = 'INSERT_VALUE_ERROR'
 
     @staticmethod
     def ToString(errorcode):
@@ -357,10 +351,14 @@ class DbHandler(object):
 
         self.mDbInfo = dbInfo
         self.mConnection = MySQLdb.connect(host = dbInfo.mHost, user = dbInfo.mUser, passwd = dbInfo.mPasswd, port = dbInfo.mPort, charset = 'utf8')
+        gLogger.info('init DB with DbInfo: %s' % dbInfo)
 
     def __del__(self):
-        self.mConnection.commit()
-        self.mConnection.close()
+        try:
+            self.mConnection.commit()
+            self.mConnection.close()
+        except Exception as ex:
+            pass
 
     def Execute(self, sql):
         # for debug msg
@@ -621,6 +619,8 @@ class ResultHandler(object):
 
         except Exception as ex:
             gLogger.exception('fail to SaveIntoDb, dbInfo: %s, errMsg: %s' % (str(dbInfo), str(ex)))
+            if ret[0] == ErrorCode.OK:
+                ret[0] = ErrorCode.UNKNOW_ERROR
 
         return ret[0]
 
