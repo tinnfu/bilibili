@@ -23,7 +23,7 @@ g_proxy_ua = {'User-Agent':'Mozilla/5.0 (X11; Linux i686) AppleWebKit/537.36 (KH
 
 gUrl = 'http://www.bilibili.com/video/'
 
-gLogger = get_logger('bili.LOG', INFO)
+gLogger = get_logger('bili.log', INFO)
 
 gCreateTable = '''CREATE table if NOT EXISTS %s.%s(`qt` int NOT NULL PRIMARY KEY AUTO_INCREMENT,`av` int NOT NULL,title nvarchar(1024),`desc` nvarchar(10240),`img` nvarchar(1024),`au` char(128),`videodate` char(128),`videosource` int not null DEFAULT 1) DEFAULT CHARACTER SET utf8'''
 
@@ -312,7 +312,7 @@ class VideoDetector(threading.Thread):
                 result.extend(ret)
 
             self.mCb.SetErrorCode(ErrorCode.OK)
-            self.mCb.SetResult(list(result))
+            self.mCb.SetResult(result)
         except Exception as ex:
             self.mLogger.exception(str(ex))
             self.mCb.SetErrorCode(ErrorCode.UNKNOW_ERROR, str(ex))
@@ -363,6 +363,7 @@ class DbHandler(object):
         self.mConnection.close()
 
     def Execute(self, sql):
+        # for debug msg
         def ShortSql(sql):
             return sql[:min(128, len(sql))]
 
@@ -377,7 +378,7 @@ class DbHandler(object):
             ret.append(cursor.execute(sql))
             end = datetime.now()
 
-            if end.microsecond - begin.microsecond > 6*1000: # > 6ms
+            if end.microsecond - begin.microsecond > 10 * 1000: # > 10ms
                 gLogger.warning('slow sql: %s, cost: %s us' % (ShortSql(sql), end.microsecond - begin.microsecond))
 
             ret.append(cursor.fetchall())
@@ -394,8 +395,8 @@ class DbHandler(object):
             if cursor != None:
                 cursor.close()
 
-            if ErrorCode.EXECUTE_SQL_ERROR != ret[0]:
-                ret = [ErrorCode.OK, ret]
+        if ErrorCode.EXECUTE_SQL_ERROR != ret[0]:
+            ret = [ErrorCode.OK, ret]
 
         gLogger.debug('execute sql: %s, ret: %s' % (ShortSql(sql), str(ret)))
         return ret
@@ -475,7 +476,7 @@ class DbHandler(object):
 
         ret = [ErrorCode.OK, '']
 
-        objList = filter(lambda obj: long(obj['av'], base = 10) not in blacklist, objList)
+        objList = filter(lambda obj: obj['av'] not in blacklist, objList)
 
         op = 'INSERT INTO ' + dbName + '.' + tableName + '(`av`, `title`, `desc`, `img`, `au`, `videodate`) VALUE '
         values = []
@@ -500,26 +501,25 @@ class DbHandler(object):
             values.append(item[1:]) # item[1] == ','
 
         gLogger.info('format value cost: %s' % (datetime.now() - start))
-        print str(datetime.now() - start)
 
-        failTimes = 0
+        failCount = 0
         start = datetime.now()
         for value in values:
             gLogger.info('INSERT packet size: %d' % len(value))
             ret = self.Execute(op + value)
             if ErrorCode.OK != ret[0]:
                 gLogger.error('error INSERT, ret: %s' % str(ret))
-                failTimes += 1
+                failCount += 1
         end = datetime.now()
 
-        if 0 == failTimes:
-            gLogger.info('INSERT OK, newItemCount: %d, insertTimes: %d, cost: %s' %\
+        if 0 == failCount:
+            gLogger.info('INSERT OK, newItemCount: %d, insertCount: %d, cost: %s' %\
                          (newItemCount, len(values), end - start))
             ret = [ErrorCode.OK, newItemCount]
         else:
-            gLogger.info('INSERT ERROR, newItemCount: %d, insertTimes: %d, cost: %s' %\
+            gLogger.info('INSERT ERROR, newItemCount: %d, insertCount: %d, cost: %s' %\
                          (newItemCount, len(values), end - start))
-            ret = [ErrorCode.EXECUTE_SQL_ERROR, 'newItemCount: %d, failTimes: %d' % (newItemCount, failTimes)]
+            ret = [ErrorCode.EXECUTE_SQL_ERROR, 'newItemCount: %d, failCount: %d' % (newItemCount, failCount)]
 
         return ret
 
@@ -589,7 +589,7 @@ class ResultHandler(object):
     def SaveIntoDb(obj, dbInfo):
         MatchType(dbInfo, DbInfo, 'dbInfo')
 
-        ret = ErrorCode.OK
+        ret = [ErrorCode.OK, '']
         try:
             db = DbHandler(dbInfo)
 
@@ -707,16 +707,17 @@ def main(config):
 
     gLogger.info('download and deal cost: %s' % (datetime.now() - start))
 
-    res = []
+    items = []
     for item in result:
-        res += item.get()
+        items += item.get()
 
     # value(av, title, desc, img, au, videodate)
-    res = map(lambda item: {'av': item[0], 'title': item[1],
+    obj = map(lambda item: {'av': long(item[0], base = 10), 'title': item[1],
                             'img': item[2], 'desc': item[3],
-                            'au': item[4], 'videodate': item[5]}, res)
+                            'au': item[4], 'videodate': item[5],
+                            'videosource': 1}, items)
 
-    gLogger.info('get target count = %d' % len(res))
+    gLogger.info('get target count = %d' % len(obj))
 
     target = config.get('saveTarget', 'target')
     saveTarget = None
@@ -733,28 +734,66 @@ def main(config):
         gLogger.die('target: %s is not support in saveTarget item' % target)
 
     start = datetime.now();
-    ret = ResultHandler.Save(res, target = saveTarget)
+    ret = ResultHandler.Save(obj, target = saveTarget)
     gLogger.info('save result cost: %s' % (datetime.now() - start))
 
     return ret
 
-def CheckConfig(config):
-    AssertEQ(True, config.has_section('saveTarget'), "make sure section['saveTarget'] is set in config")
-    AssertEQ(True, config.has_option('saveTarget', 'target'), "make sure option['target'] is set in config")
-    if config.get('saveTarget', 'target') == 'db':
-        AssertEQ(True, config.has_section('db'), "make sure section['db'] is set in config")
-        AssertEQ(True, config.has_option('db', 'host'), "make sure option['host'] is set in config")
-        AssertEQ(True, config.has_option('db', 'user'), "make sure option['user'] is set in config")
-        AssertEQ(True, config.has_option('db', 'passwd'), "make sure opttion['passwd'] is set in config")
-        AssertEQ(True, config.has_option('db', 'db'), "make sure option['db'] is set in config")
-        AssertEQ(True, config.has_option('db', 'table'), "make sure option['table'] is set in config")
-    elif config.get('saveTarget', 'target') == 'json':
-        AssertEQ(True, config.has_section('json'), "make sure section['json'] is set in config")
-        AssertEQ(True, config.has_option('json', 'jsonFile'), "make sure option['jsonFile'] is set in config")
-    else:
-        AssertEQ(True, False, 'unknow target: %s for saveTarget' % target)
+def FromJsonToDB(config):
+    obj = None
+    with open(config.get('json', 'jsonFile'), 'r') as f:
+        obj = json.load(f, encoding='utf-8')
 
-def LoadConfigWithArgv(argv = sys.argv[1:]):
+    ret = ResultHandler.Save(obj, target = DbInfo(host = config.get('db', 'host'),
+                                                  user = config.get('db', 'user'),
+                                                  passwd = config.get('db', 'passwd'),
+                                                  db = config.get('db', 'db'),
+                                                  table = config.get('db', 'table'),
+                                                  port = config.getint('db', 'port')))
+
+def FromDBToJson(config):
+    dbName = config.get('db', 'db')
+    tableName = config.get('db', 'table')
+
+    db = DbHandler(dbInfo = DbInfo(host = config.get('db', 'host'),
+                                   user = config.get('db', 'user'),
+                                   passwd = config.get('db', 'passwd'),
+                                   db = dbName,
+                                   table = tableName,
+                                   port = config.getint('db', 'port')))
+
+    sql = 'SELECT count(*) FROM %s.%s' % (dbName, tableName)
+    ret = db.Execute(sql)
+    if ErrorCode.OK != ret[0]:
+        return ret[0]
+
+    itemCount = int(ret[1][1][0][0])
+
+    items = ()
+
+    start = 0
+    while itemCount > 0:
+        count = min(itemCount, 100)
+        sql = 'SELECT * FROM %s.%s LIMIT %d,%d' % (dbName, tableName, start, count)
+        ret = db.Execute(sql)
+        if ErrorCode.OK != ret[0]:
+            gLogger.error('execute error: %s' % str(ret))
+            return ret[0]
+
+        items += ret[1][1]
+
+        itemCount -= count
+        start += count
+
+
+    # value(av, title, desc, img, au, videodate)
+    obj = map(lambda item: {'av': item[1], 'title': item[2],
+                            'img': item[3], 'desc': item[4],
+                            'au': item[5], 'videodate': item[6],
+                            'videosource': item[7]}, items)
+    return ResultHandler.Save(obj, target = JsonInfo(jsonFile = config.get('json', 'jsonFile')))
+
+def ParseCmdArgs(argv = sys.argv[1:]):
     parser = OptionParser(usage = 'Usage: python %prog [options]',
                           version = '%prog v0.1, debug version',
                           description = "DESC: %prog just visit bilibili video-music.html, "
@@ -779,12 +818,19 @@ def LoadConfigWithArgv(argv = sys.argv[1:]):
     parser.add_option_group(group)
 
     (options, args) = parser.parse_args(argv)
-
     if len(args) > 0:
         gLogger.error('unknow argument: %s' % str(args))
         parser.print_help()
         return None
 
+    if not os.path.exists(options.configFile):
+        gLogger.error('config [%s] not found' % options.configFile)
+        parser.print_help()
+        return None
+
+    return (options, args)
+
+def LoadConfig(configFile, jsonToDB):
     # default.cfg:
     # [saveTarget]
     # target = db | json
@@ -800,27 +846,58 @@ def LoadConfigWithArgv(argv = sys.argv[1:]):
     # [json]
     # jsonFile = result.json
 
-    config = ConfigParser()
-    if len(config.read(options.configFile)) == 0:
-        gLogger.error('config [%s] not found' % options.configFile)
-        parser.print_help()
-        return None
+    def CheckDBConfig(config):
+        AssertEQ(True, config.has_section('db'), "make sure section['db'] is set in config")
+        AssertEQ(True, config.has_option('db', 'host'), "make sure option['host'] is set in config")
+        AssertEQ(True, config.has_option('db', 'user'), "make sure option['user'] is set in config")
+        AssertEQ(True, config.has_option('db', 'passwd'), "make sure opttion['passwd'] is set in config")
+        AssertEQ(True, config.has_option('db', 'db'), "make sure option['db'] is set in config")
+        AssertEQ(True, config.has_option('db', 'table'), "make sure option['table'] is set in config")
+
+    def CheckJsonConfig(config):
+        AssertEQ(True, config.has_section('json'), "make sure section['json'] is set in config")
+        AssertEQ(True, config.has_option('json', 'jsonFile'), "make sure option['jsonFile'] is set in config")
 
     try:
-        CheckConfig(config)
+        config = ConfigParser()
+        if len(config.read(configFile)) == 0:
+            raise IOError('fail to read configFile: %s' % configFile)
+
+        if jsonToDB is None:
+            # check config item
+            AssertEQ(True, config.has_section('saveTarget'), "make sure section['saveTarget'] is set in config")
+            AssertEQ(True, config.has_option('saveTarget', 'target'), "make sure option['target'] is set in config")
+            if config.get('saveTarget', 'target') == 'db':
+                CheckDBConfig(config)
+            elif config.get('saveTarget', 'target') == 'json':
+                CheckJsonConfig(config)
+            else:
+                AssertEQ(True, False, 'unknow target: %s for saveTarget' % target)
+        else:
+            CheckDBConfig(config)
+            CheckJsonConfig(config)
+
     except Exception as ex:
         gLogger.exception(str(ex))
         config = None
-    finally:
-        return config
+
+    return config
 
 if __name__ == '__main__':
-    config = LoadConfigWithArgv()
-    sys.exit(main(config) if config else -1)
+    ret = ParseCmdArgs()
+    if ret is None:
+        sys.exit(-1)
 
-    # following for test
-    with open('test.json', 'r') as f:
-        buf = json.load(f, encoding='utf-8')
+    options = ret[0]
+    config = LoadConfig(options.configFile, options.JsonToDB)
+    if config is None:
+        sys.exit(-1)
 
-    ResultHandler.Save(buf, target = DbInfo(host = 'localhost', user = 'root',
-                                            passwd = 'caft', db = 'video', table = 'asrm'))
+    if options.JsonToDB is None:
+        ret = main(config)
+    elif options.JsonToDB:
+        ret = FromJsonToDB(config)
+    else:
+        ret = FromDBToJson(config)
+
+    sys.exit(ret)
