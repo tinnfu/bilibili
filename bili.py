@@ -25,7 +25,7 @@ gUrl = 'http://www.bilibili.com/video/'
 
 gLogger = get_logger('bili.log', INFO)
 
-gCreateTable = '''CREATE table if NOT EXISTS %s.%s(`qt` int NOT NULL PRIMARY KEY AUTO_INCREMENT,`av` int NOT NULL,title nvarchar(1024),`desc` nvarchar(10240),`img` nvarchar(1024),`au` char(128),`videodate` char(128),`videosource` int not null DEFAULT 1) DEFAULT CHARACTER SET utf8'''
+gCreateTable = '''CREATE table if NOT EXISTS %s.%s(`qt` int NOT NULL PRIMARY KEY AUTO_INCREMENT,`av` int NOT NULL,title nvarchar(1024),`desc` nvarchar(10240),`img` nvarchar(1024),`au` char(128),`videodate` datetime,`videosource` int not null DEFAULT 1) DEFAULT CHARACTER SET utf8'''
 
 # return type: None
 def MatchType(value, valueType, errmsg = 'PARAM'):
